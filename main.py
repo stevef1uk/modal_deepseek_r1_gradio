@@ -104,6 +104,7 @@ app = modal.App("myid-llama-cpp-server-v1")
 # Constants
 MINUTES = 60
 INFERENCE_TIMEOUT = 15 * MINUTES
+MERGE_TIMEOUT = 60 * MINUTES  # Increase to 1 hour to be safe
 MODELS_DIR = "/deepseek"
 cache_dir = "/root/.cache/deepseek"
 
@@ -221,7 +222,7 @@ model_downloaded = False
         MODELS_DIR: model_cache,
         "/merge_workspace": merge_cache
     },
-    timeout=30 * MINUTES,
+    timeout=MERGE_TIMEOUT,  # Use the longer timeout
     memory=65536,
     retries=2
 )
@@ -347,11 +348,23 @@ def merge_model_files(model_dir: str, valid_files: list[str]) -> str:
         print_flush("🔍 Verifying committed file...")
         if os.path.exists(merged_file) and os.path.getsize(merged_file) / (1024**3) > 100:
             print_flush("✅ File verified successfully")
-        else:
-            print_flush("❌ File verification failed")
-            return ""
             
-        return merged_file
+            # Clean up original files
+            print_flush("\n🧹 Cleaning up original model files...")
+            try:
+                shutil.rmtree(model_dir)
+                os.sync()  # Force flush to disk
+                print_flush("✅ Original model files deleted successfully")
+                
+                # Commit the changes to the volume
+                print_flush("💾 Committing changes to model cache volume...")
+                model_cache.commit()
+                print_flush("✅ Volume committed successfully")
+                
+            except Exception as e:
+                print_flush(f"⚠️ Warning: Could not delete original files: {str(e)}")
+            
+            return merged_file
             
     except Exception as e:
         print_flush(f"❌ Merge failed with error: {str(e)}")
