@@ -93,7 +93,7 @@ import requests
 import shutil
 
 # Constants for CUDA setup
-cuda_version = "12.4.0"
+cuda_version = "12.4.0"  # Latest stable CUDA version
 flavor = "devel"
 operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
@@ -107,23 +107,26 @@ INFERENCE_TIMEOUT = 15 * MINUTES
 MODELS_DIR = "/deepseek"
 cache_dir = "/root/.cache/deepseek"
 
+# System memory for H100-80GB
+SYSTEM_MEMORY = 131072  # 128GB of system memory
+
 # After the constants and before any function definitions
 def get_gpu_config():
     """Helper function to get the correct GPU configuration"""
-    # Default configuration
-    gpu_type = os.environ.get("gpu_type", "A100")
-    gpu_count = int(os.environ.get("gpu_count", "4"))
+    # Default configuration for H100
+    gpu_type = os.environ.get("gpu_type", "H100")  # Default to H100
+    gpu_count = int(os.environ.get("gpu_count", "3"))  # Default to 3
     
     gpu_map = {
-        "H100": "H100-80GB",
+        "H100": "H100",  # Changed from "H100-80GB" to "H100"
         "A100": "A100-40GB",
         "L40": "L40-48GB",
         "A10G": "A10G-24GB",
     }
     
     if gpu_type not in gpu_map:
-        print(f"⚠️ Warning: Unknown GPU type {gpu_type}, falling back to A100")
-        gpu_type = "A100"
+        print(f"⚠️ Warning: Unknown GPU type {gpu_type}, falling back to H100")
+        gpu_type = "H100"
     
     gpu_spec = f"{gpu_map[gpu_type]}:{gpu_count}"
     print(f"🖥️ Using GPU configuration: {gpu_spec}")
@@ -184,7 +187,6 @@ vllm_image = (
         "libomp-dev",
         "clang",
     )
-    # Install all Python dependencies at once
     .pip_install(
         [
             "fastapi",
@@ -202,8 +204,8 @@ vllm_image = (
         ]
     )
     .run_commands(
-        'CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python',
-        gpu=modal.gpu.A10G(count=1),
+        'CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_FORCE_MMQ=on" pip install llama-cpp-python',
+        gpu=modal.gpu.H100(count=1),
     )
     .entrypoint([])  # remove NVIDIA base container entrypoint
 )
@@ -542,12 +544,11 @@ def initialize(skip_download: bool = False):
 
 @app.function(
     image=vllm_image,
-    gpu="H100-80GB:3",
+    gpu="H100:3",  # Using 3 H100 GPUs (simplified format)
     container_idle_timeout=300,
     timeout=3600,
     volumes={
-        MODELS_DIR: model_cache,
-        "/merge_workspace": merge_cache,
+        "/merge_workspace": merge_cache  # Only need the merge volume for serving
     },
     secrets=[secret],
     concurrency_limit=1,
