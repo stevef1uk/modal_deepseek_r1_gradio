@@ -1,3 +1,52 @@
+"""
+Modal-based LLaMA.cpp Server with DeepSeek R1 Model
+
+This module implements a high-performance LLaMA.cpp server using Modal cloud infrastructure
+and the DeepSeek R1 model. It includes:
+
+1. Model initialization and caching
+2. Token-based authentication using Modal secrets
+3. ASGI-based request validation and routing
+4. Multi-GPU inference using H100s
+5. Automatic model downloading and merging
+
+Key Components:
+- validate(): ASGI application that handles token validation and request routing
+- serve(): GPU-accelerated inference endpoint
+- download_model(): Downloads and caches model files
+- merge_model_files(): Merges split model files
+- initialize(): Coordinates model setup and validation
+
+Authentication:
+- Uses Bearer token authentication
+- Tokens are stored in Modal secrets
+- All requests must include a valid token in the Authorization header
+- Token validation happens in the validate() ASGI application before any GPU resources are allocated
+
+Usage:
+1. Deploy the server:
+   modal deploy main.py
+
+2. Make requests:
+   curl -X POST "https://[username]--[app-name]-validate.modal.run/v1/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer <your-token>" \
+        -d '{
+          "prompt": "Your prompt here",
+          "max_tokens": 100,
+          "temperature": 0.7
+        }'
+
+Environment Variables:
+- MODELS_DIR: Directory for model storage
+- TOKEN: Authentication token (stored in Modal secrets)
+
+Dependencies:
+- Modal
+- llama-cpp-python
+- huggingface_hub
+"""
+
 # DeepSeek LLM Server with llama.cpp
 #
 # Authors:
@@ -99,7 +148,7 @@ operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
 # Create the Modal app
-app = modal.App("myid-llama-cpp-server-v1")  # Change "myid" to your desired prefix
+app = modal.App("myidsjf567321-llama-cpp-server-v1")  # Change "myid" to your desired prefix
 
 # Constants
 MINUTES = 60
@@ -206,12 +255,16 @@ vllm_image = (
     )
     .run_commands(
         'CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_FORCE_MMQ=on" pip install llama-cpp-python',
-        gpu=modal.gpu.H100(count=1),
+        gpu="H100",  # Updated to new syntax
     )
     .entrypoint([])  # remove NVIDIA base container entrypoint
 )
 
-
+# Create a lightweight image for token validation
+validation_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("fastapi", "requests", "uvicorn[standard]")
+)
 
 # Add a flag to track if model has been downloaded
 model_downloaded = False
@@ -556,131 +609,231 @@ def initialize(skip_download: bool = False):
         return False
 
 @app.function(
-    image=vllm_image,
-    gpu="H100:3",  # Using 3 H100 GPUs (simplified format)
-    container_idle_timeout=300,
+    image=validation_image,
+    gpu=None,
     timeout=3600,
-    volumes={
-        "/merge_workspace": merge_cache  # Only need the merge volume for serving
-    },
+    container_idle_timeout=300,
     secrets=[secret],
-    concurrency_limit=1,
 )
 @modal.asgi_app()
-def serve():
-    from llama_cpp.server.app import create_app
-    from llama_cpp.server.settings import ModelSettings, ServerSettings
-    from fastapi import HTTPException, responses
-    from fastapi.responses import JSONResponse
+def validate():
+    """Initial validation endpoint that gates access to the LLM server"""
+    import json
     import os
     
-    model_path = f"/merge_workspace/DeepSeek-R1-UD-IQ1_S.gguf"
-    if not os.path.exists(model_path):
-        print("❌ Model file not found at:", model_path)
-        raise FileNotFoundError(f"Model file not found at {model_path}")
+    async def app(scope, receive, send):
+        """Simple ASGI application"""
+        if scope["type"] != "http":
+            return
+            
+        # Get the request method and path
+        method = scope["method"]
+        path = scope["path"]
         
-    print(f"✅ Found model: {model_path}")
-    print(f"📦 Model size: {os.path.getsize(model_path)/(1024**3):.2f} GB")
+        if method != "POST" or path != "/v1/completions":
+            await send({
+                "type": "http.response.start",
+                "status": 404,
+                "headers": [(b"content-type", b"application/json")]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": json.dumps({"detail": "Not found"}).encode()
+            })
+            return
+            
+        # Check authorization
+        headers = dict(scope["headers"])
+        auth_header = headers.get(b"authorization", b"").decode()
+        
+        if not auth_header:
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", b"Bearer")
+                ]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": json.dumps({"detail": "No authentication token provided"}).encode()
+            })
+            return
+            
+        try:
+            scheme, token = auth_header.split()
+            if scheme.lower() != "bearer" or token != os.environ["TOKEN"]:
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"www-authenticate", b"Bearer")
+                    ]
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": json.dumps({"detail": "Invalid authentication token"}).encode()
+                })
+                return
+                
+        except Exception:
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", b"Bearer")
+                ]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": json.dumps({"detail": "Invalid authentication header"}).encode()
+            })
+            return
+            
+        # Read request body
+        message = await receive()
+        body = message.get('body', b'')
+        
+        # Handle more body chunks if any
+        while message.get('more_body', False):
+            message = await receive()
+            body += message.get('body', b'')
+            
+        try:
+            request_data = json.loads(body)
+            print(f"Received request data: {request_data}")
+            
+            if "prompt" not in request_data:
+                await send({
+                    "type": "http.response.start",
+                    "status": 400,
+                    "headers": [(b"content-type", b"application/json")]
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": json.dumps({"detail": "prompt is required"}).encode()
+                })
+                return
+                
+            # Prepare request for serve
+            processed_data = {
+                "prompt": request_data["prompt"],
+                "max_tokens": request_data.get("max_tokens", 100),
+                "temperature": request_data.get("temperature", 0.7),
+                "stream": request_data.get("stream", False)
+            }
+            
+            print(f"Calling serve with data: {processed_data}")
+            
+            # Call serve with validated data
+            response = serve.remote(processed_data)
+            
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": json.dumps(response).encode()
+            })
+            
+        except json.JSONDecodeError:
+            await send({
+                "type": "http.response.start",
+                "status": 400,
+                "headers": [(b"content-type", b"application/json")]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": json.dumps({"detail": "Invalid JSON in request body"}).encode()
+            })
+        except Exception as e:
+            print(f"Error: {str(e)}")
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [(b"content-type", b"application/json")]
+            })
+            await send({
+                "type": "http.response.body",
+                "body": json.dumps({"detail": str(e)}).encode()
+            })
     
-    # Model settings matching the working version
-    model_settings = [
-        ModelSettings(
-            model=model_path,
-            n_gpu_layers=-1,
-            n_ctx=4096,
-            n_batch=128,
-            n_threads=12,
-            verbose=True,
-            tensor_split=[0.33, 0.33, 0.34],
-        )
-    ]
-
-    # Server settings with authentication
-    server_settings = ServerSettings(
-        host="0.0.0.0",
-        port=8000,
-        api_key=os.environ["TOKEN"],
-    )
-
-    print(f"🚀 Starting server with context size: {model_settings[0].n_ctx}")
-    print(f"🔄 Batch size: {model_settings[0].n_batch}")
-
-    # Create the llama.cpp app with context length handling
-    app = create_app(
-        server_settings=server_settings,
-        model_settings=model_settings,
-    )
-
-    # Add middleware to check context length
-    @app.middleware("http")
-    async def check_context_length(request, call_next):
-        if request.url.path == "/v1/completions":
-            try:
-                body = await request.json()
-                prompt = body.get("prompt", "")
-                # Rough estimate of tokens (characters/4 is a common approximation)
-                estimated_tokens = len(prompt) // 4
-                if estimated_tokens > 4096:
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": {
-                                "message": f"Input length (~{estimated_tokens} tokens) exceeds maximum context length (4096 tokens)",
-                                "type": "context_length_exceeded",
-                                "param": "prompt",
-                                "maximum": 4096,
-                                "estimated": estimated_tokens
-                            }
-                        }
-                    )
-            except Exception as e:
-                print(f"Error during context length check: {e}")
-        response = await call_next(request)
-        return response
-
     return app
 
 @app.function(
     image=vllm_image,
-    gpu=get_gpu_config(),
-    timeout=INFERENCE_TIMEOUT,
-    volumes={MODELS_DIR: model_cache},
+    gpu="H100:3",
+    container_idle_timeout=300,
+    timeout=3600,
+    volumes={
+        "/merge_workspace": merge_cache
+    },
+    secrets=[secret],
+    concurrency_limit=1,
 )
-def create_llama_server():
-    """Create and run LLaMA.cpp server"""
+def serve(request_data: dict):
+    """Create and run LLM server - only called after validation"""
     from llama_cpp import Llama
     import os
     
-    # First verify CUDA is available
-    print("\n🔍 Checking CUDA configuration:")
-    from llama_cpp import llama_cpp
-    print(f"CUDA Available: {llama_cpp.LLAMA_CUDA_AVAILABLE}")
-    print(f"CUBLAS Available: {llama_cpp.LLAMA_CUBLAS_AVAILABLE}")
+    print(f"Received request data: {request_data}")
     
-    model_path = f"{MODELS_DIR}/DeepSeek-R1-UD-IQ1_S.gguf"
+    # Use the correct path from the merge volume
+    model_path = "/merge_workspace/DeepSeek-R1-UD-IQ1_S.gguf"
+    
+    print(f"\nChecking model path: {model_path}")
     if not os.path.exists(model_path):
-        print("❌ Model file not found")
-        return False
+        print(f"❌ Error: Model not found at {model_path}")
+        print("\n📁 Contents of /merge_workspace:")
+        for root, dirs, files in os.walk("/merge_workspace"):
+            print(f"Directory: {root}")
+            for f in files:
+                size = os.path.getsize(os.path.join(root, f)) / (1024**3)
+                print(f"  - {f} ({size:.1f} GiB)")
+        raise FileNotFoundError(f"Model not found at {model_path}")
+    
+    size_gb = os.path.getsize(model_path) / (1024**3)
+    print(f"✅ Found model: {model_path} ({size_gb:.1f} GiB)")
+    
+    print("\n🚀 Initializing LLama model...")
+    try:
+        # Initialize model with more conservative parameters
+        llm = Llama(
+            model_path=model_path,
+            n_ctx=4096,           # Reduced from 8096
+            n_batch=64,           # Reduced from 512
+            n_gpu_layers=-1,      # Still use all layers on GPU
+            verbose=True,
+            use_mmap=True,        # Enable memory mapping
+            use_mlock=False,
+            main_gpu=0,
+            tensor_split=[0.4, 0.3, 0.3],  # Split across 3 GPUs
+            offload_kqv=True,
+            n_threads=4           # Reduced from 8
+        )
+        print("✅ Model initialized successfully")
         
-    print(f"✅ Found model: {model_path}")
-    print(f"📦 Model size: {os.path.getsize(model_path)/(1024**3):.2f} GB")
-    
-    print("🚀 Creating LLaMA.cpp server...")
-    
-    # Initialize model with explicit CUDA configuration
-    llm = Llama(
-        model_path=model_path,
-        n_ctx=8096,
-        n_batch=512,
-        n_gpu_layers=-1,
-        verbose=True,
-        use_mmap=False,  # Try disabling memory mapping
-        use_mlock=False,  # Try disabling memory locking
-        main_gpu=0,
-        tensor_split=[0],
-        offload_kqv=True,
-        n_threads=8
-    )
+        print("\n💭 Processing completion request...")
+        response = llm.create_completion(
+            prompt=request_data["prompt"],
+            max_tokens=request_data.get("max_tokens", 100),
+            temperature=request_data.get("temperature", 0.7),
+            stream=request_data.get("stream", False)
+        )
+        print(f"✅ Response generated: {response}")
+        return response
+        
+    except Exception as e:
+        print(f"❌ Error during model initialization or inference: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        print(f"Traceback:\n{traceback.format_exc()}")
+        raise
 
 if __name__ == "__main__":
     print("🚀 To deploy the LLaMA.cpp server, run:")
