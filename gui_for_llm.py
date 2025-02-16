@@ -15,86 +15,98 @@ import uvicorn
 import os
 import requests
 import json
+import modal
 
-# Function to interact with the LLM service
+# Create Modal app
+app = modal.App("llama-gradio-interface")
+
+# Create Modal secret reference for server URL
+server_url_secret = modal.Secret.from_name("llama_server_url")
+
 def chat_with_llm(access_key: str, message: str):
     """Chat function that uses the LLM service."""
     # Retrieve the expected access key from environment variables
     expected_access_key = os.environ.get("MODAL_SECRET_GRADIO_APP_ACCESS_KEY")
     if access_key != expected_access_key:
-        yield "Error: Invalid access key."
-        return
+        return "Error: Invalid access key."
 
     # Access the LLM API key and server URL
     api_key = os.environ.get("llamakey")
-    server_url = os.environ.get("LLAMA_SERVER_URL", "https://stevef1uk--myid-llama-cpp-server-v1-serve-dev.modal.run")
+    server_url = os.environ.get("LLAMA_SERVER_URL")
     
     if not api_key:
-        yield "Error: LLM API key not found."
-        return
+        return "Error: LLM API key not found."
+    if not server_url:
+        return "Error: Server URL not found in environment variables"
 
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
     }
+    
     payload = {
-        "model": "llama2",
-        "prompt": f"Question: {message}\n\nAnswer:",
-        "max_tokens": 10000,
+        "prompt": f"{message}\n\n",
+        "max_tokens": 2000,
         "temperature": 0.7,
-        "stream": True  # Enable streaming
+        "stream": False,  # Disable streaming for now
+        "stop": ["</s>", "\n\n"],
+        "echo": False
     }
 
     try:
         response = requests.post(
-            f"{server_url}/v1/completions",  # Use the configured server URL
+            f"{server_url}/v1/completions",
             headers=headers,
             json=payload,
-            stream=True,  # Enable streaming
+            stream=False,
             timeout=300
         )
         response.raise_for_status()
-
-        # Accumulate the streamed response
-        accumulated_response = ""
-        for line in response.iter_lines():
-            if line:
-                decoded_line = line.decode('utf-8').strip()
-                print("Raw Line:", decoded_line)  # Debugging line
-                if decoded_line.startswith("data: "):
-                    decoded_line = decoded_line[len("data: "):]
-                try:
-                    data = json.loads(decoded_line)
-                    text = data.get("choices", [{}])[0].get("text", "")
-                    accumulated_response += text
-                    yield accumulated_response  # Stream the accumulated response
-                except json.JSONDecodeError:
-                    print("Failed to decode JSON:", decoded_line)  # Debugging line
-                    continue
+        
+        # Parse the response
+        data = response.json()
+        if "choices" in data and len(data["choices"]) > 0:
+            return data["choices"][0].get("text", "").strip()
+        return "Error: No response generated"
 
     except Exception as e:
-        yield f"Error: {str(e)}"
+        print(f"Error details: {str(e)}")
+        if hasattr(e, 'response'):
+            print(f"Response status: {e.response.status_code}")
+            print(f"Response text: {e.response.text}")
+        return f"Error: {str(e)}"
 
-# Define the Gradio interface with streaming
-demo = gr.Interface(
-    fn=chat_with_llm,
-    inputs=[
-        gr.Textbox(label="Access Key", type="password"),
-        gr.Textbox(label="Enter your message")
-    ],
-    outputs=gr.Textbox(label="Response", interactive=False),
-    title="LLM Chat Interface",
-    description="Enter the access key and your message to chat with the Llama model.",
-    live=False  # Disable live updates to prevent pre-submission output
-)
+def create_app():
+    """Create and return the ASGI app"""
+    # Define the Gradio interface
+    demo = gr.Interface(
+        fn=chat_with_llm,
+        inputs=[
+            gr.Textbox(label="Access Key", type="password"),
+            gr.Textbox(label="Enter your message")
+        ],
+        outputs=gr.Textbox(label="Response", interactive=False),
+        title="LLM Chat Interface",
+        description="Enter the access key and your message to chat with the Llama model.",
+        live=False
+    )
 
-# Create a FastAPI app and mount the Gradio app
-web_app = FastAPI()
-app = mount_gradio_app(
-    app=web_app,
-    blocks=demo,
-    path="/"
+    # Create FastAPI app and mount Gradio
+    app = FastAPI()
+    return mount_gradio_app(
+        app=app,
+        blocks=demo,
+        path="/"
+    )
+
+@app.function(
+    secrets=[server_url_secret],
+    is_generator=True  # Add this flag
 )
+@modal.asgi_app()
+def web_app():
+    """Return the ASGI app"""
+    return create_app()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(create_app(), host="0.0.0.0", port=8000)

@@ -269,6 +269,9 @@ validation_image = (
 # Add a flag to track if model has been downloaded
 model_downloaded = False
 
+# Global variable to store the LLM instance
+_llm = None
+
 @app.function(
     image=merge_image,
     volumes={
@@ -781,45 +784,57 @@ def serve(request_data: dict):
     from llama_cpp import Llama
     import os
     
+    global _llm
     print(f"Received request data: {request_data}")
     
-    # Use the correct path from the merge volume
-    model_path = "/merge_workspace/DeepSeek-R1-UD-IQ1_S.gguf"
-    
-    print(f"\nChecking model path: {model_path}")
-    if not os.path.exists(model_path):
-        print(f"❌ Error: Model not found at {model_path}")
-        print("\n📁 Contents of /merge_workspace:")
-        for root, dirs, files in os.walk("/merge_workspace"):
-            print(f"Directory: {root}")
-            for f in files:
-                size = os.path.getsize(os.path.join(root, f)) / (1024**3)
-                print(f"  - {f} ({size:.1f} GiB)")
-        raise FileNotFoundError(f"Model not found at {model_path}")
-    
-    size_gb = os.path.getsize(model_path) / (1024**3)
-    print(f"✅ Found model: {model_path} ({size_gb:.1f} GiB)")
-    
-    print("\n🚀 Initializing LLama model...")
-    try:
-        # Initialize model with more conservative parameters
-        llm = Llama(
-            model_path=model_path,
-            n_ctx=4096,           # Reduced from 8096
-            n_batch=64,           # Reduced from 512
-            n_gpu_layers=-1,      # Still use all layers on GPU
-            verbose=True,
-            use_mmap=True,        # Enable memory mapping
-            use_mlock=False,
-            main_gpu=0,
-            tensor_split=[0.4, 0.3, 0.3],  # Split across 3 GPUs
-            offload_kqv=True,
-            n_threads=4           # Reduced from 8
-        )
-        print("✅ Model initialized successfully")
+    # Initialize LLM only if it hasn't been initialized yet
+    if _llm is None:
+        # Use the correct path from the merge volume
+        model_path = "/merge_workspace/DeepSeek-R1-UD-IQ1_S.gguf"
         
+        print(f"\nChecking model path: {model_path}")
+        if not os.path.exists(model_path):
+            print(f"❌ Error: Model not found at {model_path}")
+            print("\n📁 Contents of /merge_workspace:")
+            for root, dirs, files in os.walk("/merge_workspace"):
+                print(f"Directory: {root}")
+                for f in files:
+                    size = os.path.getsize(os.path.join(root, f)) / (1024**3)
+                    print(f"  - {f} ({size:.1f} GiB)")
+            raise FileNotFoundError(f"Model not found at {model_path}")
+        
+        size_gb = os.path.getsize(model_path) / (1024**3)
+        print(f"✅ Found model: {model_path} ({size_gb:.1f} GiB)")
+        
+        print("\n🚀 Initializing LLama model...")
+        try:
+            # Initialize model with more conservative parameters
+            _llm = Llama(
+                model_path=model_path,
+                n_ctx=4096,           # Reduced from 8096
+                n_batch=64,           # Reduced from 512
+                n_gpu_layers=-1,      # Still use all layers on GPU
+                verbose=True,
+                use_mmap=True,        # Enable memory mapping
+                use_mlock=False,
+                main_gpu=0,
+                tensor_split=[0.4, 0.3, 0.3],  # Split across 3 GPUs
+                offload_kqv=True,
+                n_threads=4           # Reduced from 8
+            )
+            print("✅ Model initialized successfully")
+        except Exception as e:
+            print(f"❌ Error during model initialization: {str(e)}")
+            print(f"Error type: {type(e)}")
+            import traceback
+            print(f"Traceback:\n{traceback.format_exc()}")
+            raise
+    else:
+        print("✅ Using existing model instance")
+
+    try:
         print("\n💭 Processing completion request...")
-        response = llm.create_completion(
+        response = _llm.create_completion(
             prompt=request_data["prompt"],
             max_tokens=request_data.get("max_tokens", 100),
             temperature=request_data.get("temperature", 0.7),
@@ -829,7 +844,7 @@ def serve(request_data: dict):
         return response
         
     except Exception as e:
-        print(f"❌ Error during model initialization or inference: {str(e)}")
+        print(f"❌ Error during inference: {str(e)}")
         print(f"Error type: {type(e)}")
         import traceback
         print(f"Traceback:\n{traceback.format_exc()}")

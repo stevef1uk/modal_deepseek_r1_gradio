@@ -79,7 +79,7 @@ Create a couple of secrets in modal using their GUI:
 
 i) llama_server_url
 
-Use key: LLAMA_SERVER_URL and store the above url e.g. https://stevef1uk--myid-llama-cpp-server-v1-serve.modal.run/v1/completions
+Use key: LLAMA_SERVER_URL and store the above url e.g. https://stevef1uk--myid-llama-cpp-server-v1-serve.modal.run
 
 ii) MODAL_SECRET_LLAMA_CPP_API_KEY
 
