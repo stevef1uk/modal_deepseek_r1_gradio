@@ -99,7 +99,7 @@ operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
 # Create the Modal app
-app = modal.App("sjf1298-llama-cpp-server-v1")  # Change "myid" to your desired prefix
+app = modal.App("myid-llama-cpp-server-v1")  # Change "myid" to your desired prefix
 
 # Constants
 MINUTES = 60
