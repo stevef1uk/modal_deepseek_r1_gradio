@@ -47,7 +47,7 @@
 #    modal deploy main.py
 #
 # 3. Test the deployment:
-#    export API_URL="https://[your-prefix]--myid-llama-cpp-server-v1-serve.modal.run"
+#    export API_URL="https://[your-prefix]--[app-name]-llama-cpp-server-v1-serve.modal.run"
 #    export API_TOKEN="your-token-from-logs"
 #    
 #    curl -X POST "${API_URL}/v1/completions" \
@@ -63,7 +63,7 @@
 # All API endpoints (except documentation) require Bearer token authentication
 # Example:
 # curl -H "Authorization: Bearer your-token" \
-#   https://[your-prefix]--myid-llama-cpp-server-v1-serve.modal.run/v1/completions \
+#   https://[your-prefix]--[app-name]-llama-cpp-server-v1-serve.modal.run/v1/completions \
 #   -d '{"prompt": "Hello, how are you?", "max_tokens": 100}'
 #
 # Model Settings:
@@ -99,7 +99,7 @@ operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
 # Create the Modal app
-app = modal.App("myid-llama-cpp-server-v1")  # Change "myid" to your desired prefix
+app = modal.App("sjf1298-llama-cpp-server-v1")  # Change "myid" to your desired prefix
 
 # Constants
 MINUTES = 60
@@ -686,7 +686,7 @@ if __name__ == "__main__":
     print("🚀 To deploy the LLaMA.cpp server, run:")
     print("modal deploy main.py")
     print("\nOnce deployed, the server will be available at:")
-    print("https://stevef1uk--myid-llama-cpp-server-v1-serve.modal.run")
+    print("https://[username]--[app-name]-llama-cpp-server-v1-serve.modal.run")
     
     # For local development, you can use:
     # modal deploy --env dev main.py
