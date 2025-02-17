@@ -16,97 +16,137 @@ import os
 import requests
 import json
 import modal
+import time
 
 # Create Modal app
-app = modal.App("llama-gradio-interface")
+modal_app = modal.App("llama-gradio-interface")
 
 # Create Modal secret reference for server URL
 server_url_secret = modal.Secret.from_name("llama_server_url")
 
+# Create a persistent FastAPI app
+web_app = FastAPI()
+
 def chat_with_llm(access_key: str, message: str):
     """Chat function that uses the LLM service."""
+    print(f"Received chat request with message: {message}")
+    
     # Retrieve the expected access key from environment variables
     expected_access_key = os.environ.get("MODAL_SECRET_GRADIO_APP_ACCESS_KEY")
     if access_key != expected_access_key:
-        return "Error: Invalid access key."
+        yield "Error: Invalid access key."
+        return
 
     # Access the LLM API key and server URL
     api_key = os.environ.get("llamakey")
     server_url = os.environ.get("LLAMA_SERVER_URL")
     
     if not api_key:
-        return "Error: LLM API key not found."
+        yield "Error: LLM API key not found."
+        return
     if not server_url:
-        return "Error: Server URL not found in environment variables"
+        yield "Error: Server URL not found in environment variables"
+        return
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}",
     }
     
+    enhanced_prompt = f"Please provide a clear, concise answer to this question: {message}"
+    
     payload = {
-        "prompt": f"{message}\n\n",
-        "max_tokens": 2000,
+        "prompt": enhanced_prompt,
+        "max_tokens": 500,
         "temperature": 0.7,
-        "stream": False,  # Disable streaming for now
-        "stop": ["</s>", "\n\n"],
-        "echo": False
+        "stream": False
     }
 
     try:
+        print("Making request to server...")
         response = requests.post(
             f"{server_url}/v1/completions",
             headers=headers,
             json=payload,
-            stream=False,
             timeout=300
         )
+        print(f"Response status code: {response.status_code}")
         response.raise_for_status()
         
-        # Parse the response
-        data = response.json()
-        if "choices" in data and len(data["choices"]) > 0:
-            return data["choices"][0].get("text", "").strip()
-        return "Error: No response generated"
-
+        try:
+            json_response = response.json()
+            print(f"Response received: {json_response}")
+            if 'choices' in json_response and json_response['choices']:
+                text = json_response['choices'][0].get('text', '').strip()
+                if text:
+                    # Simulate streaming by yielding chunks of the text
+                    words = text.split()
+                    accumulated = ""
+                    chunk_size = 3  # Number of words per chunk
+                    
+                    for i in range(0, len(words), chunk_size):
+                        chunk = ' '.join(words[i:i + chunk_size])
+                        accumulated += chunk + ' '
+                        yield accumulated.strip()
+                        time.sleep(0.1)  # Small delay between chunks
+                    
+                    # Ensure we yield the complete text at the end
+                    if accumulated.strip() != text:
+                        yield text
+                else:
+                    yield "No text in response"
+            else:
+                yield "No valid choices in response"
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}")
+            yield f"Error decoding response: {str(e)}"
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Request error: {str(e)}"
+        print(error_msg)
+        yield error_msg
     except Exception as e:
-        print(f"Error details: {str(e)}")
-        if hasattr(e, 'response'):
-            print(f"Response status: {e.response.status_code}")
-            print(f"Response text: {e.response.text}")
-        return f"Error: {str(e)}"
+        error_msg = f"Unexpected error: {str(e)}"
+        print(error_msg)
+        yield error_msg
 
-def create_app():
-    """Create and return the ASGI app"""
-    # Define the Gradio interface
-    demo = gr.Interface(
-        fn=chat_with_llm,
-        inputs=[
-            gr.Textbox(label="Access Key", type="password"),
-            gr.Textbox(label="Enter your message")
-        ],
-        outputs=gr.Textbox(label="Response", interactive=False),
-        title="LLM Chat Interface",
-        description="Enter the access key and your message to chat with the Llama model.",
-        live=False
-    )
+# Create the Gradio interface
+demo = gr.Interface(
+    fn=chat_with_llm,
+    inputs=[
+        gr.Textbox(label="Access Key", type="password"),
+        gr.Textbox(label="Enter your message", lines=4)
+    ],
+    outputs=gr.Textbox(
+        label="Response", 
+        interactive=False, 
+        lines=15,
+        max_lines=30,
+        autoscroll=False,
+        show_copy_button=True,
+        container=True,
+        scale=2
+    ),
+    title="LLM Chat Interface",
+    description="Enter the access key and your message to chat with the Llama model.",
+    live=False,
+    allow_flagging="never"
+)
 
-    # Create FastAPI app and mount Gradio
-    app = FastAPI()
-    return mount_gradio_app(
-        app=app,
-        blocks=demo,
-        path="/"
-    )
+# Mount Gradio app to FastAPI
+app = mount_gradio_app(
+    app=web_app,
+    blocks=demo,
+    path="/"
+)
 
-@app.function(
-    secrets=[server_url_secret],
-    is_generator=True  # Add this flag
+@modal_app.function(
+    secrets=[server_url_secret]
 )
 @modal.asgi_app()
-def web_app():
-    """Return the ASGI app"""
-    return create_app()
+def serve():
+    """Return the persistent ASGI app"""
+    return web_app
 
 if __name__ == "__main__":
-    uvicorn.run(create_app(), host="0.0.0.0", port=8000)
+    uvicorn.run(web_app, host="0.0.0.0", port=8000)

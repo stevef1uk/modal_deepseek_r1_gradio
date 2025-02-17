@@ -18,40 +18,42 @@ GRADIO_PORT = 8000
 
 app = modal.App("gradio-app")
 
-image = modal.Image.debian_slim(python_version="3.11").pip_install("gradio", "fastapi", "uvicorn")
-
-# Define the secrets
-llm_secret = modal.Secret.from_name("MODAL_SECRET_LLAMA_CPP_API_KEY")
+# Define the secrets with exact names
+llm_secret = modal.Secret.from_name("MODAL_SECRET_LLAMA_CPP_API_KEY")  # This creates env var MODAL_SECRET_LLAMA_CPP_API_KEY_LLAMAKEY
 gradio_access_secret = modal.Secret.from_name("gradio_app_access_key")
-server_url_secret = modal.Secret.from_name("llama_server_url")  # Add new secret for server URL
+server_url_secret = modal.Secret.from_name("llama_server_url")
 
+# Create the base image
+image = (modal.Image.debian_slim(python_version="3.11")
+         .pip_install("gradio", "fastapi", "uvicorn"))
+
+# Add the GUI script to the image
 fname = "gui_for_llm.py"
 gradio_script_local_path = pathlib.Path(__file__).parent / fname
-gradio_script_remote_path = pathlib.Path("/root") / fname
 
 if not gradio_script_local_path.exists():
     raise RuntimeError(f"{fname} not found! Place the script with your gradio app in the same directory.")
 
-gradio_script_mount = modal.Mount.from_local_file(
-    gradio_script_local_path,
-    gradio_script_remote_path,
-)
+# Add the local file to the image instead of using Mount
+image = image.add_local_file(str(gradio_script_local_path), "/root/gui_for_llm.py")
 
 @app.function(
     image=image,
-    secrets=[llm_secret, gradio_access_secret, server_url_secret],  # Add server URL secret
-    mounts=[gradio_script_mount],
+    secrets=[llm_secret, gradio_access_secret, server_url_secret],
     allow_concurrent_inputs=100,
-    concurrency_limit=1, # Drives number of containers!
+    concurrency_limit=1,  # Drives number of containers!
 )
 @modal.web_server(GRADIO_PORT, startup_timeout=60)
 def web_app():
-    target = shlex.quote(str(gradio_script_remote_path))
-    cmd = f"python {target} --host 0.0.0.0 --port {GRADIO_PORT}"
+    cmd = f"python /root/gui_for_llm.py --host 0.0.0.0 --port {GRADIO_PORT}"
     subprocess.Popen(cmd, shell=True)
 
-    api_key = modal.Secret.from_name("MODAL_SECRET_LLAMA_CPP_API_KEY")
-    print("API Key Retrieved:", api_key)  # Debugging line
-    if not api_key:
-        return "Error: LLM API key not found."
+    # Wait for the server to start
+    import time
+    time.sleep(2)  # Give the server a moment to start
+
+    return "Gradio web server is running"
+
+if __name__ == "__main__":
+    modal.runner.deploy_stub(app)
 

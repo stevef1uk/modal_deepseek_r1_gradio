@@ -726,23 +726,46 @@ def validate():
                 "prompt": request_data["prompt"],
                 "max_tokens": request_data.get("max_tokens", 100),
                 "temperature": request_data.get("temperature", 0.7),
-                "stream": request_data.get("stream", False)
+                "stream": request_data.get("stream", False)  # Use the requested stream value
             }
             
             print(f"Calling serve with data: {processed_data}")
             
-            # Call serve with validated data
-            response = serve.remote(processed_data)
-            
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"application/json")]
-            })
-            await send({
-                "type": "http.response.body",
-                "body": json.dumps(response).encode()
-            })
+            if processed_data["stream"]:
+                # Streaming response
+                await send({
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")]
+                })
+                
+                async for chunk in serve.remote_gen(processed_data):
+                    await send({
+                        "type": "http.response.body",
+                        "body": json.dumps(chunk).encode(),
+                        "more_body": True
+                    })
+                
+                # Send final empty chunk
+                await send({
+                    "type": "http.response.body",
+                    "body": b"",
+                    "more_body": False
+                })
+            else:
+                # Non-streaming response
+                response = serve.remote(processed_data)
+                
+                await send({
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")]
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": json.dumps(response).encode(),
+                    "more_body": False
+                })
             
         except json.JSONDecodeError:
             await send({
@@ -840,7 +863,8 @@ def serve(request_data: dict):
             temperature=request_data.get("temperature", 0.7),
             stream=request_data.get("stream", False)
         )
-        print(f"✅ Response generated: {response}")
+        
+        # Return the response directly (no yielding for non-streaming)
         return response
         
     except Exception as e:
@@ -858,4 +882,3 @@ if __name__ == "__main__":
     
     # For local development, you can use:
     # modal deploy --env dev main.py
-
