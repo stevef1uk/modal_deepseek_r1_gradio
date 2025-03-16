@@ -1,4 +1,7 @@
+
 NOTE: This is a fixed version of the example modal script:  https://github.com/modal-labs/modal-examples/blob/main/misc/deepseek_openai_server.py
+
+If you just want to self-host Ollama on Modal then check out my newer repo: https://github.com/stevef1uk/modal_ollama_gemma3_gradio.git
 
 You have to have a Modal account (a nice container as a service system)  and then create a secret with your hugging face key. 
 Modal: https://modal.com/use-cases/language-models 
